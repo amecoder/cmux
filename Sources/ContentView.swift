@@ -13940,9 +13940,7 @@ private struct TabItemView: View, Equatable {
     }
 
     private func applyTabColor(_ hex: String?, targetIds: [UUID]) {
-        for targetId in targetIds {
-            tabManager.setTabColor(tabId: targetId, color: hex)
-        }
+        tabManager.applyWorkspaceColor(hex, toWorkspaceIds: targetIds)
     }
 
     private func toggleWorkspaceTerminalScrollBarHidden(targetIds: [UUID]) {
