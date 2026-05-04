@@ -338,9 +338,10 @@ box.cmux-tab-bar {
   min-height: 36px;
 }
 
-button.cmux-tab {
+button.cmux-tab,
+box.cmux-tab {
   min-height: 36px;
-  padding: 0 14px;
+  padding: 0 8px 0 14px;
   border-radius: 0;
   border: none;
   border-bottom: 2px solid transparent;
@@ -350,12 +351,14 @@ button.cmux-tab {
   box-shadow: none;
 }
 
-button.cmux-tab:hover {
+button.cmux-tab:hover,
+box.cmux-tab:hover {
   background: @cmux_button_hover;
   color: @cmux_text;
 }
 
-button.cmux-tab.cmux-tab-active {
+button.cmux-tab.cmux-tab-active,
+box.cmux-tab.cmux-tab-active {
   background: @cmux_chrome_bg;
   color: @cmux_text;
   border-bottom: 2px solid @cmux_accent;
@@ -6317,30 +6320,56 @@ class CMUXLinuxWindow:
         workspace = self._current_workspace()
         for surface in workspace.surfaces.values():
             is_active = surface.id == workspace.current_surface_id
-            tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-            tab_btn = Gtk.Button()
-            self._add_css_class(tab_btn, "cmux-tab")
-            if is_active:
-                self._add_css_class(tab_btn, "cmux-tab-active")
+            sid = surface.id
             tab_label = Gtk.Label(label=surface.title, ellipsize=3)
-            tab_label.set_max_width_chars(20)
+            tab_label.set_max_width_chars(18)
             if GTK_MAJOR >= 4:
-                tab_btn.set_child(tab_label)
+                tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                self._add_css_class(tab_box, "cmux-tab")
+                if is_active:
+                    self._add_css_class(tab_box, "cmux-tab-active")
+                click = Gtk.GestureClick.new()
+                click.connect("released", lambda _g, _n, _x, _y, s=sid: self._on_tab_clicked(s))
+                tab_box.add_controller(click)
+                tab_box.append(tab_label)
+                close_btn = Gtk.Button()
+                close_icon = Gtk.Image.new_from_icon_name("window-close-symbolic")
+                close_btn.set_child(close_icon)
+                self._add_css_class(close_btn, "cmux-tab-close")
+                close_btn.connect("clicked", lambda *_, s=sid: self._on_tab_close_clicked(s))
+                tab_box.append(close_btn)
+                self._attach_tab_drag_source(tab_box, sid)
+                tabs_box.append(tab_box)
             else:
-                tab_btn.add(tab_label)
-            surface_id = surface.id
-            tab_btn.connect("clicked", lambda *_, sid=surface_id: self._on_tab_clicked(sid))
-            self._attach_tab_drag_source(tab_btn, surface_id)
-            if GTK_MAJOR >= 4:
-                tabs_box.append(tab_btn)
-            else:
-                tabs_box.pack_start(tab_btn, False, False, 0)
+                tab_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                self._add_css_class(tab_inner, "cmux-tab")
+                if is_active:
+                    self._add_css_class(tab_inner, "cmux-tab-active")
+                tab_inner.pack_start(tab_label, True, True, 4)
+                close_btn = Gtk.Button()
+                close_btn.add(Gtk.Label(label="×"))
+                self._add_css_class(close_btn, "cmux-tab-close")
+                close_btn.connect("clicked", lambda *_, s=sid: self._on_tab_close_clicked(s))
+                tab_inner.pack_start(close_btn, False, False, 2)
+                tab_ebox = Gtk.EventBox()
+                tab_ebox.add(tab_inner)
+                tab_ebox.connect("button-press-event", lambda w, e, s=sid: self._on_tab_press_gtk3(w, e, s))
+                self._attach_tab_drag_source(tab_ebox, sid)
+                tabs_box.pack_start(tab_ebox, False, False, 0)
         if GTK_MAJOR < 4:
             tabs_box.show_all()
 
     def _on_tab_clicked(self, surface_id: str) -> None:
         self.select_surface(surface_id)
         self.refresh_tab_bar()
+
+    def _on_tab_close_clicked(self, surface_id: str) -> None:
+        self.close_surface_from_params({"surface_id": surface_id})
+
+    def _on_tab_press_gtk3(self, widget: Any, event: Any, surface_id: str) -> bool:
+        if event.button == 1 and not self._dnd_dragging_surface_id:
+            self._on_tab_clicked(surface_id)
+        return False
 
     def _attach_tab_drag_source(self, tab_btn: Gtk.Button, surface_id: str) -> None:
         try:
@@ -6375,6 +6404,10 @@ class CMUXLinuxWindow:
             tab_btn.connect(
                 "drag-begin",
                 lambda w, ctx, sid=surface_id: setattr(self, "_dnd_dragging_surface_id", sid),
+            )
+            tab_btn.connect(
+                "drag-end",
+                lambda w, ctx: setattr(self, "_dnd_dragging_surface_id", None),
             )
 
     def _setup_dnd_controllers(self, overlay: Gtk.Widget) -> None:
