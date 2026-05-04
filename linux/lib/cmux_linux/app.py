@@ -55,6 +55,10 @@ except (ImportError, ValueError):
         raise SystemExit(1)
 
 from gi.repository import GObject, Gio, GLib, Gtk, Vte  # noqa: E402
+try:
+    import cairo  # noqa: F401 - registers cairo.Context foreign type for GTK3 draw signals
+except ImportError:
+    pass
 from .browser import browser_backend_limit  # noqa: E402
 from .shortcuts import (  # noqa: E402
     KEY_NAME_ALIASES,
@@ -418,6 +422,12 @@ box.cmux-workspace-row {
 label.cmux-workspace-label {
   color: inherit;
   font-size: 13px;
+}
+
+frame.cmux-dnd-highlight {
+  background: rgba(10, 132, 255, 0.18);
+  border: 2px solid rgba(10, 132, 255, 0.85);
+  border-radius: 4px;
 }
 """.strip()
 FALLBACK_SCREENSHOT_PNG_BASE64 = (
@@ -1951,9 +1961,19 @@ class CMUXLinuxWindow:
             right_box.append(content_stack)
             right_box.set_vexpand(True)
         else:
+            content_overlay_gtk3 = Gtk.Overlay()
+            content_overlay_gtk3.add(self.stack)
+            dnd_highlight = Gtk.Frame()
+            self._add_css_class(dnd_highlight, "cmux-dnd-highlight")
+            dnd_highlight.set_no_show_all(True)
+            dnd_highlight.set_can_focus(False)
+            dnd_highlight.set_sensitive(False)
+            self._dnd_overlay_draw_area = dnd_highlight
+            content_overlay_gtk3.add_overlay(dnd_highlight)
+            self._setup_dnd_controllers_gtk3(content_overlay_gtk3)
             right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
             right_box.pack_start(tab_bar, False, False, 0)
-            right_box.pack_start(self.stack, True, True, 0)
+            right_box.pack_start(content_overlay_gtk3, True, True, 0)
 
         paned = self._build_paned(Gtk.Orientation.HORIZONTAL, self.sidebar, right_box)
         self._add_css_class(paned, "cmux-root")
@@ -6310,8 +6330,7 @@ class CMUXLinuxWindow:
                 tab_btn.add(tab_label)
             surface_id = surface.id
             tab_btn.connect("clicked", lambda *_, sid=surface_id: self._on_tab_clicked(sid))
-            if GTK_MAJOR >= 4 and hasattr(Gtk, "DragSource"):
-                self._attach_tab_drag_source(tab_btn, surface_id)
+            self._attach_tab_drag_source(tab_btn, surface_id)
             if GTK_MAJOR >= 4:
                 tabs_box.append(tab_btn)
             else:
@@ -6324,27 +6343,39 @@ class CMUXLinuxWindow:
         self.refresh_tab_bar()
 
     def _attach_tab_drag_source(self, tab_btn: Gtk.Button, surface_id: str) -> None:
-        if not hasattr(Gtk, "DragSource"):
-            return
         try:
             from gi.repository import Gdk
         except ImportError:
             return
-        drag = Gtk.DragSource.new()
-        drag.set_actions(Gdk.DragAction.MOVE)
+        if GTK_MAJOR >= 4:
+            if not hasattr(Gtk, "DragSource"):
+                return
+            drag = Gtk.DragSource.new()
+            drag.set_actions(Gdk.DragAction.MOVE)
 
-        def _prepare(_src: Any, _x: float, _y: float) -> "Gdk.ContentProvider | None":
-            val = GObject.Value()
-            val.init(GObject.TYPE_STRING)
-            val.set_string(surface_id)
-            return Gdk.ContentProvider.new_for_value(val)
+            def _prepare(_src: Any, _x: float, _y: float) -> "Gdk.ContentProvider | None":
+                val = GObject.Value()
+                val.init(GObject.TYPE_STRING)
+                val.set_string(surface_id)
+                return Gdk.ContentProvider.new_for_value(val)
 
-        def _drag_begin(_src: Any, _drag: Any) -> None:
-            self._dnd_dragging_surface_id = surface_id
+            def _drag_begin(_src: Any, _drag: Any) -> None:
+                self._dnd_dragging_surface_id = surface_id
 
-        drag.connect("prepare", _prepare)
-        drag.connect("drag-begin", _drag_begin)
-        tab_btn.add_controller(drag)
+            drag.connect("prepare", _prepare)
+            drag.connect("drag-begin", _drag_begin)
+            tab_btn.add_controller(drag)
+        else:
+            tab_btn.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.MOVE)
+            tab_btn.drag_source_add_text_targets()
+            tab_btn.connect(
+                "drag-data-get",
+                lambda w, ctx, sel, info, t, sid=surface_id: sel.set_text(sid, -1),
+            )
+            tab_btn.connect(
+                "drag-begin",
+                lambda w, ctx, sid=surface_id: setattr(self, "_dnd_dragging_surface_id", sid),
+            )
 
     def _setup_dnd_controllers(self, overlay: Gtk.Widget) -> None:
         if GTK_MAJOR < 4 or not hasattr(Gtk, "DropTarget"):
@@ -6395,6 +6426,10 @@ class CMUXLinuxWindow:
             self._dnd_overlay_draw_area.queue_draw()
         if not source_id or not zone or zone == "center":
             return False
+        direction_map = {"top": "up", "bottom": "down", "left": "left", "right": "right"}
+        direction = direction_map.get(zone)
+        if not direction:
+            return False
         try:
             workspace = self._current_workspace()
             if source_id not in workspace.surfaces:
@@ -6405,7 +6440,7 @@ class CMUXLinuxWindow:
             self.drag_surface_to_split_from_params({
                 "surface_id": source_id,
                 "target_surface_id": target_surface.id,
-                "direction": zone,
+                "direction": direction,
             })
             self.refresh_tab_bar()
             return True
@@ -6443,6 +6478,92 @@ class CMUXLinuxWindow:
         else:
             cr.rectangle(1, height * 0.5 + 1, width - 2, height * 0.5 - 2)
         cr.stroke()
+
+    def _draw_dnd_overlay_gtk3(self, widget: Any, cr: Any) -> bool:
+        return False
+
+    def _setup_dnd_controllers_gtk3(self, overlay: Gtk.Widget) -> None:
+        try:
+            from gi.repository import Gdk
+        except ImportError:
+            return
+        overlay.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, [], Gdk.DragAction.MOVE)
+        overlay.drag_dest_add_text_targets()
+        overlay.connect("drag-motion", self._on_dnd_motion_gtk3)
+        overlay.connect("drag-leave", self._on_dnd_leave_gtk3)
+        overlay.connect("drag-data-received", self._on_dnd_drop_gtk3)
+        overlay.connect("get-child-position", self._on_dnd_overlay_position_gtk3)
+
+    def _on_dnd_motion_gtk3(self, widget: Any, context: Any, x: int, y: int, time: int) -> bool:
+        try:
+            from gi.repository import Gdk
+        except ImportError:
+            return False
+        w = self.stack.get_allocated_width()
+        h = self.stack.get_allocated_height()
+        zone = self._dnd_zone_from_coords(float(x), float(y), float(w), float(h))
+        if zone != self._dnd_active_zone:
+            self._dnd_active_zone = zone
+            highlight = self._dnd_overlay_draw_area
+            if highlight is not None:
+                if zone and zone != "center":
+                    highlight.show()
+                    widget.queue_resize()
+                else:
+                    highlight.hide()
+        Gdk.drag_status(context, Gdk.DragAction.MOVE, time)
+        return True
+
+    def _on_dnd_overlay_position_gtk3(self, overlay: Any, widget: Any, allocation: Any) -> bool:
+        zone = self._dnd_active_zone
+        if not zone or zone == "center" or widget is not self._dnd_overlay_draw_area:
+            return False
+        w = self.stack.get_allocated_width()
+        h = self.stack.get_allocated_height()
+        if zone == "left":
+            allocation.x, allocation.y, allocation.width, allocation.height = 0, 0, w // 2, h
+        elif zone == "right":
+            allocation.x, allocation.y, allocation.width, allocation.height = w // 2, 0, w // 2, h
+        elif zone == "top":
+            allocation.x, allocation.y, allocation.width, allocation.height = 0, 0, w, h // 2
+        else:
+            allocation.x, allocation.y, allocation.width, allocation.height = 0, h // 2, w, h // 2
+        return True
+
+    def _on_dnd_leave_gtk3(self, widget: Any, context: Any, time: int) -> None:
+        self._dnd_active_zone = None
+        self._dnd_dragging_surface_id = None
+        if self._dnd_overlay_draw_area is not None:
+            self._dnd_overlay_draw_area.hide()
+
+    def _on_dnd_drop_gtk3(self, widget: Any, context: Any, x: int, y: int, selection: Any, info: int, time: int) -> None:
+        source_id = (selection.get_text() if selection else None) or self._dnd_dragging_surface_id
+        zone = self._dnd_active_zone
+        self._dnd_active_zone = None
+        self._dnd_dragging_surface_id = None
+        if self._dnd_overlay_draw_area is not None:
+            self._dnd_overlay_draw_area.hide()
+        if not source_id or not zone or zone == "center":
+            return
+        direction_map = {"top": "up", "bottom": "down", "left": "left", "right": "right"}
+        direction = direction_map.get(zone)
+        if not direction:
+            return
+        try:
+            workspace = self._current_workspace()
+            if source_id not in workspace.surfaces:
+                return
+            target_surface = self._current_surface()
+            if source_id == target_surface.id:
+                return
+            self.drag_surface_to_split_from_params({
+                "surface_id": source_id,
+                "target_surface_id": target_surface.id,
+                "direction": direction,
+            })
+            self.refresh_tab_bar()
+        except Exception:  # noqa: BLE001
+            pass
 
     def select_surface(self, surface_id: str) -> None:
         workspace = self._current_workspace()
