@@ -6341,19 +6341,35 @@ class CMUXLinuxWindow:
                 self._attach_tab_drag_source(tab_box, sid)
                 tabs_box.append(tab_box)
             else:
-                tab_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+                # GTK3: EventBox as drag source + button-release-event for select.
+                # Using button-RELEASE (not press) avoids conflict with drag threshold detection.
+                # Inner close Gtk.Button has its own GDK window → its click doesn't reach EventBox.
+                try:
+                    from gi.repository import Gdk as _Gdk
+                except ImportError:
+                    _Gdk = None
+                tab_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
                 self._add_css_class(tab_inner, "cmux-tab")
                 if is_active:
                     self._add_css_class(tab_inner, "cmux-tab-active")
+                tab_label.set_xalign(0)
                 tab_inner.pack_start(tab_label, True, True, 4)
-                close_btn = Gtk.Button()
-                close_btn.add(Gtk.Label(label="×"))
+                close_btn = Gtk.Button(label="×")
                 self._add_css_class(close_btn, "cmux-tab-close")
                 close_btn.connect("clicked", lambda *_, s=sid: self._on_tab_close_clicked(s))
-                tab_inner.pack_start(close_btn, False, False, 2)
+                tab_inner.pack_start(close_btn, False, False, 0)
                 tab_ebox = Gtk.EventBox()
+                if _Gdk:
+                    tab_ebox.add_events(
+                        _Gdk.EventMask.BUTTON_PRESS_MASK
+                        | _Gdk.EventMask.BUTTON_RELEASE_MASK
+                        | _Gdk.EventMask.BUTTON1_MOTION_MASK
+                    )
                 tab_ebox.add(tab_inner)
-                tab_ebox.connect("button-press-event", lambda w, e, s=sid: self._on_tab_press_gtk3(w, e, s))
+                tab_ebox.connect(
+                    "button-release-event",
+                    lambda w, e, s=sid: self._on_tab_release_gtk3(w, e, s),
+                )
                 self._attach_tab_drag_source(tab_ebox, sid)
                 tabs_box.pack_start(tab_ebox, False, False, 0)
         if GTK_MAJOR < 4:
@@ -6366,7 +6382,8 @@ class CMUXLinuxWindow:
     def _on_tab_close_clicked(self, surface_id: str) -> None:
         self.close_surface_from_params({"surface_id": surface_id})
 
-    def _on_tab_press_gtk3(self, widget: Any, event: Any, surface_id: str) -> bool:
+    def _on_tab_release_gtk3(self, widget: Any, event: Any, surface_id: str) -> bool:
+        # Only select if left-click release and drag hasn't started
         if event.button == 1 and not self._dnd_dragging_surface_id:
             self._on_tab_clicked(surface_id)
         return False
@@ -6520,8 +6537,14 @@ class CMUXLinuxWindow:
             from gi.repository import Gdk
         except ImportError:
             return
-        overlay.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, [], Gdk.DragAction.MOVE)
+        # DestDefaults.DROP only — we handle motion/status ourselves to avoid conflict
+        overlay.drag_dest_set(Gtk.DestDefaults.DROP, [], Gdk.DragAction.MOVE)
         overlay.drag_dest_add_text_targets()
+        overlay.add_events(
+            Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+        )
         overlay.connect("drag-motion", self._on_dnd_motion_gtk3)
         overlay.connect("drag-leave", self._on_dnd_leave_gtk3)
         overlay.connect("drag-data-received", self._on_dnd_drop_gtk3)
